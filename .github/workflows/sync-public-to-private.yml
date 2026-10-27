@@ -1,0 +1,56 @@
+name: Synchronise public master to private master
+
+on:
+  push:
+    branches: [master]
+
+concurrency: ersem-public-to-private-master
+
+permissions:
+  contents: read
+
+jobs:
+  synchronise:
+    # Do not run if this workflow is copied to a fork or another repository.
+    if: github.repository == 'PlymouthMarineLaboratory/ersem'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the public source history
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward private master
+        env:
+          ERSEM_DEV_TOKEN: ${{ secrets.ERSEM_DEV_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${ERSEM_DEV_TOKEN:?Configure the ERSEM_DEV_TOKEN repository secret}"
+          target=https://github.com/PlymouthMarineLaboratory/ersem-dev.git
+
+          # Pass credentials only to Git, without storing them in the checkout.
+          auth=$(printf 'x-access-token:%s' "$ERSEM_DEV_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${target}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          export GIT_TERMINAL_PROMPT=0
+
+          git fetch --no-tags "$target" refs/heads/master
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            # Ordinary push also rejects concurrent non-fast-forward updates.
+            git push "$target" HEAD:refs/heads/master
+          elif git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo 'Private master already contains public master; nothing to push.'
+          else
+            echo '::error::Histories diverged. No push attempted. See .github/SYNC.md for manual resolution.'
+            echo 'Public-only commit hashes:'
+            git rev-list FETCH_HEAD..HEAD
+            echo 'Private-only commit hashes (inspect privately):'
+            git rev-list HEAD..FETCH_HEAD
+            exit 1
+          fi
