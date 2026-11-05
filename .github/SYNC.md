@@ -1,8 +1,10 @@
 # Public to private sync
 
 The workflow updates only `ersem-dev:master` when public `ersem:master` receives
-a push. It permits only fast-forward pushes and leaves
-private development branches alone. An already-ahead private master is a no-op.
+a push. It fast-forwards where possible and otherwise merges public master into
+private master, preserving both histories. Only private master is pushed;
+private development branches are left alone. An already-ahead private master
+is a no-op. Updates use ordinary pushes, never force pushes.
 
 ## Setup
 
@@ -19,13 +21,16 @@ private development branches alone. An already-ahead private master is a no-op.
    rules permit the push. Protection failures require administrator review;
    this workflow does not bypass them. Token pushes can trigger private workflows.
 
-## Divergence
+## Merge failures
 
-The failed run lists differing hashes without private commit messages. In an
-authenticated private clone, fetch public master into a remote named `public`
+Conflicts and unrelated histories stop the workflow without pushing. Merge
+output is hidden to keep private file names and content out of public logs.
+In an authenticated private clone, fetch public master into a remote named `public`
 and inspect `git log --left-right --graph --oneline public/master...origin/master`.
 Resolve conflicts by manually merging public master into a private development
 branch and integrating that merge into private master through normal review.
-Preserve public commit ancestry: squashing or cherry-picking will not resolve
-the ancestry check. Rerun once private master contains public master. Unrelated
-histories need maintainer review. Never publish private commits or rewrite history.
+Preserve public commit ancestry by using a regular merge rather than squashing
+or cherry-picking. Rerun the failed job once private master contains public
+master. Unrelated histories need maintainer review. Never publish private
+commits or rewrite history. If private master changes during a run, a rejected
+push can be retried by rerunning the job.

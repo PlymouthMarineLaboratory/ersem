@@ -1,11 +1,14 @@
 name: Synchronise public master to private master
 
+# Start the sync when a commit or merged pull request updates public master.
 on:
   push:
     branches: [master]
 
+# Allow only one sync to run at a time for this destination branch.
 concurrency: ersem-public-to-private-master
 
+# The built-in token only reads public ERSEM. A separate secret writes to private.
 permissions:
   contents: read
 
@@ -19,38 +22,67 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: master
+          # Full history is needed to find common ancestors and perform merges.
           fetch-depth: 0
+          # Do not reuse the public repository's token for private Git operations.
           persist-credentials: false
 
-      - name: Fast-forward private master
+      - name: Merge public master into private master
         env:
           ERSEM_DEV_TOKEN: ${{ secrets.ERSEM_DEV_TOKEN }}
         shell: bash
         run: |
+          # Stop on command errors, unset variables, or a failed pipeline.
           set -euo pipefail
 
+          # Fail immediately if the private repository's access token is missing.
           : "${ERSEM_DEV_TOKEN:?Configure the ERSEM_DEV_TOKEN repository secret}"
           target=https://github.com/PlymouthMarineLaboratory/ersem-dev.git
 
-          # Pass credentials only to Git, without storing them in the checkout.
+          # Encode the token for HTTP Basic authentication and mask the encoded
+          # value too: GitHub already masks the original secret, but not this form.
           auth=$(printf 'x-access-token:%s' "$ERSEM_DEV_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
+          # Give Git one temporary HTTP header, scoped to the private repository.
+          # Environment variables keep credentials out of URLs and config files.
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0="http.${target}.extraheader"
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          # Fail instead of waiting for interactive login if authentication fails.
           export GIT_TERMINAL_PROMPT=0
 
+          # Save the public commit before switching to the private history.
+          public_commit=$(git rev-parse HEAD)
+          # FETCH_HEAD now points to private master. A missing branch or denied
+          # access stops the job here; no remote branch has been changed.
           git fetch --no-tags "$target" refs/heads/master
-          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
-            # Ordinary push also rejects concurrent non-fast-forward updates.
-            git push "$target" HEAD:refs/heads/master
-          elif git merge-base --is-ancestor HEAD FETCH_HEAD; then
+          # If private already contains this public commit, there is nothing to do.
+          if git merge-base --is-ancestor "$public_commit" FETCH_HEAD; then
             echo 'Private master already contains public master; nothing to push.'
-          else
-            echo '::error::Histories diverged. No push attempted. See .github/SYNC.md for manual resolution.'
-            echo 'Public-only commit hashes:'
-            git rev-list FETCH_HEAD..HEAD
-            echo 'Private-only commit hashes (inspect privately):'
-            git rev-list HEAD..FETCH_HEAD
+            exit 0
+          fi
+          # Refuse to join repositories that have no shared commit history.
+          if ! git merge-base "$public_commit" FETCH_HEAD >/dev/null; then
+            echo '::error::Unrelated histories. No push attempted; maintainer review required.'
             exit 1
           fi
+
+          # A new merge commit needs an author identity in this temporary clone.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Start from private master without moving the local public master branch.
+          git checkout --detach FETCH_HEAD >/dev/null 2>&1
+          # Bring public into private: --ff fast-forwards if possible, otherwise
+          # Git creates a merge commit preserving both histories. --no-edit uses
+          # the default message without opening an editor. Hide merge output so
+          # private file names and conflict details never appear in public logs.
+          if ! git merge --ff --no-edit "$public_commit" >/dev/null 2>&1; then
+            # Restore the local checkout after a failed merge. Nothing is pushed.
+            git merge --abort >/dev/null 2>&1 || true
+            echo '::error::Merge failed. No push attempted. Resolve conflicts privately; see .github/SYNC.md.'
+            exit 1
+          fi
+          # Push only the resulting commit to private master. Other branches and
+          # the public repository are untouched. An ordinary push rejects any
+          # concurrent update that would require overwriting private history.
+          git push "$target" HEAD:refs/heads/master
